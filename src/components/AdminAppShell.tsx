@@ -139,6 +139,23 @@ const sections: NavSection[] = [
     panelTitle: "Administration",
     icon: <AdminIcon />,
     links: [
+      {
+        href: "#partners",
+        label: "Partners",
+        active: (p) => p.startsWith("/admin/partners"),
+        children: [
+          {
+            href: "/admin/partners",
+            label: "All partners",
+            active: (p) => p === "/admin/partners",
+          },
+          {
+            href: "/admin/partners/assign",
+            label: "Assign serials",
+            active: (p) => p.startsWith("/admin/partners/assign"),
+          },
+        ],
+      },
       { href: "/admin/users", label: "Users", active: (p) => p.startsWith("/admin/users") },
       {
         href: "/admin/audit-logs",

@@ -24,6 +24,7 @@ model User {
   sessions      Session[]
   vouchersActivated Voucher[] @relation("ActivatedBy")
   passwordChangeOtp PasswordChangeOtp?
+  partnerLinks      PartnerUser[]
 }
 
 model PasswordChangeOtp {
@@ -141,7 +142,22 @@ model Voucher {
   cartPurchase CartPurchase?
   prepaidCard  PrepaidCard?
 
+  /// Partner inventory ownership (independent of operational status).
+  /// UNASSIGNED | ASSIGNED | SOLD | REDEEMED | CANCELLED
+  inventoryStatus   String    @default("UNASSIGNED")
+  partnerId         String?
+  partner           Partner?  @relation("VoucherAssignedPartner", fields: [partnerId], references: [id], onDelete: SetNull)
+  storeId           String?
+  store             PartnerStore? @relation("VoucherAssignedStore", fields: [storeId], references: [id], onDelete: SetNull)
+  assignedAt        DateTime?
+  saleTransactionId String?
+  soldAt            DateTime?
+  assignments       VoucherAssignment[]
+
   @@index([pinLast4])
+  @@index([inventoryStatus])
+  @@index([partnerId])
+  @@index([storeId])
 }
 
 // Physical prepaid card: QR serial + optional barcode → scratch PIN (Voucher) → wallet credit.
@@ -165,8 +181,11 @@ model PrepaidCard {
   claimedCartSession   CartSession? @relation(fields: [claimedCartSessionId], references: [id])
   createdAt            DateTime     @default(now())
   cartPurchase         CartPurchase?
+  partnerId            String?
+  partner              Partner?     @relation("PrepaidCardAssignedPartner", fields: [partnerId], references: [id], onDelete: SetNull)
 
   @@index([retailMarket])
+  @@index([partnerId])
 }
 
 // Cart session for physical-card checkout. phoneE164/verifiedAt set only for legacy SMS Phase-1 paths.
@@ -328,4 +347,108 @@ model IccidValidationConfig {
 model IccidWhitelist {
   iccid     String   @id @db.VarChar(32)
   createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Partner commission Phase A — partners, payout profile, voucher assignment
+// (Commission ledger + Wise payouts land in later phases.)
+// ---------------------------------------------------------------------------
+
+model Partner {
+  id                     String   @id @default(cuid())
+  name                   String
+  countryCode            String   @default("BR") @db.VarChar(2)
+  email                  String?
+  phoneE164              String?
+  /// Default commission in BRL centavos (6000 = R$60). Admin-editable; future sales only.
+  defaultCommissionCents Int      @default(6000)
+  active                 Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  payoutProfile PartnerPayoutProfile?
+  stores        PartnerStore[]
+  users         PartnerUser[]
+  assignments   VoucherAssignment[]
+  vouchers      Voucher[]     @relation("VoucherAssignedPartner")
+  prepaidCards  PrepaidCard[] @relation("PrepaidCardAssignedPartner")
+
+  @@index([active])
+}
+
+model PartnerStore {
+  id        String   @id @default(cuid())
+  partnerId String
+  partner   Partner  @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  name      String
+  code      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  vouchers Voucher[] @relation("VoucherAssignedStore")
+
+  @@index([partnerId])
+}
+
+model PartnerUser {
+  id        String  @id @default(cuid())
+  partnerId String
+  partner   Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String  @default("dealer") // dealer | manager
+
+  @@unique([partnerId, userId])
+  @@index([userId])
+}
+
+/// Brazilian bank recipient for Wise partner payouts (not PIX).
+model PartnerPayoutProfile {
+  id                  String    @id @default(cuid())
+  partnerId           String    @unique
+  partner             Partner   @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  payoutMethod        String    @default("wise_br_bank")
+  currency            String    @default("BRL") @db.VarChar(3)
+  legalType           String // PRIVATE | BUSINESS
+  accountHolderName   String
+  taxId               String // CPF/CNPJ digits only
+  taxIdType           String // CPF | CNPJ
+  bankCode            String?
+  branchCode          String?
+  accountNumber       String?
+  accountType         String?
+  addressLine1        String?
+  addressCity         String?
+  addressState        String?
+  addressPostCode     String?
+  addressCountry      String?   @default("BR") @db.VarChar(2)
+  wiseRecipientId     String?   @unique
+  wiseRecipientStatus String?
+  wiseRecipientRaw    String?   @db.Text
+  verifiedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([payoutMethod])
+}
+
+/// Immutable history of partner assignment (never delete).
+model VoucherAssignment {
+  id           String   @id @default(cuid())
+  voucherId    String
+  voucher      Voucher  @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  partnerId    String?
+  partner      Partner? @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  storeId      String?
+  /// assigned | unassigned | reassigned
+  action       String
+  batchLabel   String?
+  serialFrom   String?
+  serialTo     String?
+  assignedById String?
+  note         String?  @db.Text
+  createdAt    DateTime @default(now())
+
+  @@index([voucherId, createdAt])
+  @@index([partnerId])
 }
