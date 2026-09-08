@@ -154,6 +154,11 @@ const sections: NavSection[] = [
             label: "Assign serials",
             active: (p) => p.startsWith("/admin/partners/assign"),
           },
+          {
+            href: "/admin/commissions",
+            label: "Commission ledger",
+            active: (p) => p.startsWith("/admin/commissions"),
+          },
         ],
       },
       { href: "/admin/users", label: "Users", active: (p) => p.startsWith("/admin/users") },

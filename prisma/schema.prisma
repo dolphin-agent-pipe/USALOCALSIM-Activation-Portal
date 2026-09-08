@@ -153,6 +153,7 @@ model Voucher {
   saleTransactionId String?
   soldAt            DateTime?
   assignments       VoucherAssignment[]
+  commission        Commission?
 
   @@index([pinLast4])
   @@index([inventoryStatus])
@@ -275,6 +276,7 @@ model CartPurchase {
   redemptionCoverageTier  String?
   /// JSON array of T-Mobile add-on SKUs (ADD-TM-*), when network is t_mobile.
   redemptionAddonSkus     String?  @db.Text
+  commission              Commission?
 
   @@index([cartSessionId])
   @@index([redemptionNetworkSlug])
@@ -372,6 +374,7 @@ model Partner {
   assignments   VoucherAssignment[]
   vouchers      Voucher[]     @relation("VoucherAssignedPartner")
   prepaidCards  PrepaidCard[] @relation("PrepaidCardAssignedPartner")
+  commissions   Commission[]
 
   @@index([active])
 }
@@ -451,4 +454,64 @@ model VoucherAssignment {
 
   @@index([voucherId, createdAt])
   @@index([partnerId])
+}
+
+// ---------------------------------------------------------------------------
+// Partner commission Phase B — ledger (Wise payouts in Phase D)
+// ---------------------------------------------------------------------------
+
+model Commission {
+  id                    String   @id @default(cuid())
+  partnerId             String
+  partner               Partner  @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+
+  /// PENDING_FUNDS | ELIGIBLE | INCLUDED_IN_PAYOUT | PAID | CANCELLED | ADMIN_REVIEW
+  status                String   @default("PENDING_FUNDS")
+
+  /// Snapshotted BRL centavos owed for this voucher sale.
+  amountBrlCents        Int
+  currency              String   @default("BRL") @db.VarChar(3)
+
+  voucherId             String   @unique
+  voucher               Voucher  @relation(fields: [voucherId], references: [id], onDelete: Restrict)
+  voucherSerialSnapshot String?
+  cartPurchaseId        String?  @unique
+  cartPurchase          CartPurchase? @relation(fields: [cartPurchaseId], references: [id], onDelete: SetNull)
+
+  saleTransactionId     String   @unique
+  paymentProvider       String
+  saleAmountCents       Int?
+  saleCurrency          String?  @db.VarChar(3)
+  customerCountry       String?  @db.VarChar(2)
+
+  soldAt                DateTime
+  fundsAvailableAt      DateTime?
+  eligibleAt            DateTime?
+
+  payoutBatchId         String?
+  payoutAttemptId       String?
+
+  chargebackOfCommissionId String?
+  refundExternalRef     String?
+  failureReason         String?  @db.Text
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  statusHistory         CommissionStatusEvent[]
+
+  @@index([partnerId, status])
+  @@index([status, soldAt])
+  @@index([payoutBatchId])
+}
+
+model CommissionStatusEvent {
+  id           String     @id @default(cuid())
+  commissionId String
+  commission   Commission @relation(fields: [commissionId], references: [id], onDelete: Cascade)
+  fromStatus   String?
+  toStatus     String
+  note         String?
+  createdAt    DateTime   @default(now())
+
+  @@index([commissionId, createdAt])
 }

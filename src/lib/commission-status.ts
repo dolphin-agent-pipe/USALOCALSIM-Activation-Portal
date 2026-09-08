@@ -1,0 +1,24 @@
+export const COMMISSION_STATUS = {
+  PENDING_FUNDS: "PENDING_FUNDS",
+  ELIGIBLE: "ELIGIBLE",
+  INCLUDED_IN_PAYOUT: "INCLUDED_IN_PAYOUT",
+  PAID: "PAID",
+  CANCELLED: "CANCELLED",
+  CHARGEBACK_ADJUSTMENT: "CHARGEBACK_ADJUSTMENT",
+  OFFSET_PARTIAL: "OFFSET_PARTIAL",
+  OFFSET_SETTLED: "OFFSET_SETTLED",
+  ADMIN_REVIEW: "ADMIN_REVIEW",
+} as const;
+
+export type CommissionStatus = (typeof COMMISSION_STATUS)[keyof typeof COMMISSION_STATUS];
+
+export const COMMISSION_PAYMENT_PROVIDER = {
+  STRIPE_CARD: "stripe_card",
+  MERCADOPAGO_PIX: "mercadopago_pix",
+  PIX_STRIPE: "pix_stripe",
+  PIX_ASAAS: "pix_asaas",
+  POS: "pos",
+} as const;
+
+export type CommissionPaymentProvider =
+  (typeof COMMISSION_PAYMENT_PROVIDER)[keyof typeof COMMISSION_PAYMENT_PROVIDER];

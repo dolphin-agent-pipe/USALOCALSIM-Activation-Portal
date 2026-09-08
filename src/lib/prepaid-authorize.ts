@@ -9,6 +9,8 @@ import {
 } from "./prepaid-payment-source";
 import { VOUCHER_STATUS } from "./voucher-status";
 import { ensurePrepaidVoucherEligible } from "./voucher-retail-activation";
+import { recordCommissionForVoucherSale } from "./commission-engine";
+import { mapPrepaidSourceToCommissionProvider } from "./commission-settlement";
 
 export type AuthorizePrepaidInput = {
   prepaidCardId: string;
@@ -62,6 +64,11 @@ async function ensureCartSessionId(tx: Db, cartSessionId: string | null | undefi
     },
   });
   return row.id;
+}
+
+function saleCurrencyForPrepaid(retailMarket: string, source: PrepaidPaymentSource): string {
+  if (source === PREPAID_PAYMENT_SOURCES.MERCADOPAGO) return "BRL";
+  return retailMarket === "br" ? "BRL" : "USD";
 }
 
 async function authorizeInTransaction(
@@ -214,6 +221,17 @@ async function authorizeInTransaction(
       declaredPayCents: paidCents,
       creditAmountCents: creditCents > 0 ? creditCents : prepaid.voucher.creditAmountCents,
     },
+  });
+
+  await recordCommissionForVoucherSale(tx, {
+    saleTransactionId: stripePaymentId,
+    paymentProvider: mapPrepaidSourceToCommissionProvider(input.paymentSource),
+    cartPurchaseId: purchase.id,
+    voucherId: prepaid.voucher.id,
+    saleAmountCents: paidCents,
+    saleCurrency: saleCurrencyForPrepaid(prepaid.retailMarket, input.paymentSource),
+    customerCountry: prepaid.retailMarket === "br" ? "BR" : undefined,
+    soldAt: new Date(),
   });
 
   return {
