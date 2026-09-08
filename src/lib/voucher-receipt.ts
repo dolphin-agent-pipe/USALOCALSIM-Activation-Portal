@@ -72,7 +72,9 @@ function receiptSupportEmail(): string {
 
 function receiptPaymentMethod(source: string): string {
   if (source === PREPAID_PAYMENT_SOURCES.STRIPE) return "Card via Stripe";
-  if (source === PREPAID_PAYMENT_SOURCES.MERCADOPAGO) return "PIX via Asaas";
+  if (source === PREPAID_PAYMENT_SOURCES.MERCADOPAGO) return "PIX (Mercado Pago)";
+  if (source === PREPAID_PAYMENT_SOURCES.PIX_ASAAS) return "PIX via Asaas";
+  if (source === PREPAID_PAYMENT_SOURCES.PIX_STRIPE) return "PIX via Stripe";
   if (source === PREPAID_PAYMENT_SOURCES.POS) return "Retail POS";
   return source.toUpperCase() || NA;
 }

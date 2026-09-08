@@ -12,7 +12,7 @@ import {
   CART_SECONDARY_BUTTON_CLASS,
   CART_TEXT_INPUT_CLASS,
 } from "@/lib/cart-panel";
-import { isCartMercadoPagoUiEnabled } from "@/lib/mercadopago-config";
+import { isPixCheckoutUiEnabled } from "@/lib/pix-provider";
 
 export type CartPlanRow = {
   id: string;
@@ -72,13 +72,13 @@ export function CartRegistrationAndPayment({
   const [email, setEmail] = useState("");
   const [payDollars, setPayDollars] = useState(() => centsToUsdInput(defaultPayCents ?? 0));
   const [planId, setPlanId] = useState<string | null>(plans[0]?.id ?? null);
-  const [loading, setLoading] = useState<"stripe" | "mercadopago" | null>(null);
+  const [loading, setLoading] = useState<"stripe" | "pix" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedPlan = useMemo(() => plans.find((p) => p.id === planId) ?? null, [plans, planId]);
   const parsedPayCents = useMemo(() => parseUsdInputToCents(payDollars), [payDollars]);
   const payAmountValid = parsedPayCents !== null && parsedPayCents > 0;
-  const mercadoPagoEnabled = isCartMercadoPagoUiEnabled();
+  const pixCheckoutEnabled = isPixCheckoutUiEnabled();
   const amountLocked = lockPayAmountCents != null && lockPayAmountCents > 0;
   const displayCents = amountLocked ? lockPayAmountCents : (parsedPayCents ?? defaultPayCents ?? 0);
 
@@ -113,7 +113,7 @@ export function CartRegistrationAndPayment({
     }
   }
 
-  async function checkoutMercadoPago() {
+  async function checkoutPix() {
     if (!planId) return;
     const cents = parseUsdInputToCents(payDollars);
     if (cents == null || cents <= 0) {
@@ -121,15 +121,15 @@ export function CartRegistrationAndPayment({
       return;
     }
     setError(null);
-    setLoading("mercadopago");
+    setLoading("pix");
     try {
-      const res = await fetch("/api/cart/checkout/mercadopago", {
+      const res = await fetch("/api/cart/checkout/pix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ planId, email, customerName, payAmountCents: cents }),
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string; url?: string };
-      if (res.status === 501) {
+      if (res.status === 404) {
         setError(t("mercadopagoUnavailable"));
         return;
       }
@@ -233,14 +233,14 @@ export function CartRegistrationAndPayment({
             >
               {loading === "stripe" ? t("paying") : t("payWithStripe")}
             </button>
-            {mercadoPagoEnabled ? (
+            {pixCheckoutEnabled ? (
               <button
                 type="button"
                 className={CART_SECONDARY_BUTTON_CLASS}
                 disabled={loading !== null || !formReady}
-                onClick={() => void checkoutMercadoPago()}
+                onClick={() => void checkoutPix()}
               >
-                {loading === "mercadopago" ? t("paying") : t("payWithMercadoPago")}
+                {loading === "pix" ? t("paying") : t("payWithMercadoPago")}
               </button>
             ) : null}
             <p className="cart-flow-pay-methods-note">{t("registerSecurePayHint")}</p>

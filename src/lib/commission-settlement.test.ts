@@ -16,6 +16,12 @@ describe("commission-settlement", () => {
     expect(mapPrepaidSourceToCommissionProvider(PREPAID_PAYMENT_SOURCES.MERCADOPAGO)).toBe(
       COMMISSION_PAYMENT_PROVIDER.MERCADOPAGO_PIX,
     );
+    expect(mapPrepaidSourceToCommissionProvider(PREPAID_PAYMENT_SOURCES.PIX_STRIPE)).toBe(
+      COMMISSION_PAYMENT_PROVIDER.PIX_STRIPE,
+    );
+    expect(mapPrepaidSourceToCommissionProvider(PREPAID_PAYMENT_SOURCES.PIX_ASAAS)).toBe(
+      COMMISSION_PAYMENT_PROVIDER.PIX_ASAAS,
+    );
     expect(mapPrepaidSourceToCommissionProvider(PREPAID_PAYMENT_SOURCES.POS)).toBe(
       COMMISSION_PAYMENT_PROVIDER.POS,
     );

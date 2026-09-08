@@ -2,6 +2,8 @@
 export const PREPAID_PAYMENT_SOURCES = {
   STRIPE: "stripe",
   MERCADOPAGO: "mercadopago",
+  PIX_STRIPE: "pix_stripe",
+  PIX_ASAAS: "pix_asaas",
   POS: "pos",
 } as const;
 

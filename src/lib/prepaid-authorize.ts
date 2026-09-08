@@ -46,6 +46,9 @@ function paymentIdForSource(source: PrepaidPaymentSource, externalPaymentRef: st
   if (source === PREPAID_PAYMENT_SOURCES.MERCADOPAGO) {
     return ref.startsWith("mp:") ? ref : `mp:${ref}`;
   }
+  if (source === PREPAID_PAYMENT_SOURCES.PIX_ASAAS) {
+    return ref.startsWith("asaas:") ? ref : `asaas:${ref}`;
+  }
   return ref;
 }
 
@@ -67,7 +70,13 @@ async function ensureCartSessionId(tx: Db, cartSessionId: string | null | undefi
 }
 
 function saleCurrencyForPrepaid(retailMarket: string, source: PrepaidPaymentSource): string {
-  if (source === PREPAID_PAYMENT_SOURCES.MERCADOPAGO) return "BRL";
+  if (
+    source === PREPAID_PAYMENT_SOURCES.MERCADOPAGO ||
+    source === PREPAID_PAYMENT_SOURCES.PIX_ASAAS ||
+    source === PREPAID_PAYMENT_SOURCES.PIX_STRIPE
+  ) {
+    return "BRL";
+  }
   return retailMarket === "br" ? "BRL" : "USD";
 }
 

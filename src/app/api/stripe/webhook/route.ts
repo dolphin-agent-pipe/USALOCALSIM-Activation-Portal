@@ -9,7 +9,9 @@ import {
   isStripeCartVoucherFlow,
   readCartSessionIdFromStripeMetadata,
   readPrepaidCardIdFromStripeMetadata,
+  STRIPE_PIX_CART_CHECKOUT_FLOW,
 } from "@/lib/stripe-cart-flow";
+import { stripePixProvider } from "@/lib/pix/providers/stripe-pix";
 import { generateOpaqueResumeToken, newResumeTokenExpiresAt } from "@/lib/cart-resume";
 import { sendCartPurchasePaidEmail } from "@/lib/email";
 import { displayTransactionId } from "@/lib/invoice";
@@ -57,6 +59,17 @@ export async function POST(req: Request) {
   const paymentId = typeof paymentIntent === "string" ? paymentIntent : session.id;
 
   const flow = session.metadata?.flow ?? "";
+
+  if (flow === STRIPE_PIX_CART_CHECKOUT_FLOW) {
+    const result = await stripePixProvider.processPaymentApproved(session.id);
+    await prisma.auditLog.create({
+      data: {
+        action: "stripe_pix_cart_checkout_completed",
+        metadata: JSON.stringify({ sessionId: session.id, result }),
+      },
+    });
+    return NextResponse.json({ received: true });
+  }
 
   if (isStripeCartVoucherFlow(flow)) {
     const existingPurchase = await prisma.cartPurchase.findUnique({

@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { pixCartCheckoutBodySchema, validatePixCartCheckout } from "@/lib/pix-cart-checkout";
 import { createPixCheckout } from "@/lib/pix/pix-checkout-service";
+import { activePixProviderId } from "@/lib/pix/pix-provider-registry";
 import { isPixCheckoutEnabled } from "@/lib/pix-provider";
 
-/** @deprecated Use POST /api/cart/checkout/pix — kept for backward-compatible clients. */
+/** Unified PIX checkout — routes to Stripe PIX or Asaas (direct / Mercado Pago bridge). */
 export async function POST(req: Request) {
   if (!isPixCheckoutEnabled()) {
     return NextResponse.json({ error: "PIX checkout is not enabled for this deployment." }, { status: 404 });
@@ -45,5 +46,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: checkout.error }, { status: 503 });
   }
 
-  return NextResponse.json({ url: checkout.redirectUrl, preferenceId: checkout.providerRef });
+  return NextResponse.json({
+    url: checkout.redirectUrl,
+    mode: checkout.mode,
+    provider: activePixProviderId(),
+    providerRef: checkout.providerRef,
+  });
 }

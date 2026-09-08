@@ -87,6 +87,24 @@ npm run db:migrate:deploy
 
 Phase F adds `CronJobLock` for cron idempotency.
 
+## PIX provider switch (Phase E)
+
+Set `PIX_PROVIDER` to choose customer PIX checkout without changing commission logic:
+
+| Value | Behavior |
+|-------|----------|
+| `none` | PIX button hidden |
+| `stripe` | Stripe Checkout with `payment_method_types: ['pix']` (Brazil BRL) |
+| `asaas` | Direct Asaas API when `ASAAS_API_KEY` set; otherwise Mercado Pago bridge |
+
+Commission events (`onPaymentConfirmed` / `onFundsSettledAvailable`) flow through `customer-payment-bridge.ts`. PIX sales promote to `ELIGIBLE` immediately unless `COMMISSION_PIX_IMMEDIATE_SETTLE=false`.
+
+Webhooks:
+
+- Mercado Pago: `/api/mercadopago/webhook` (bridge mode)
+- Asaas: `/api/webhooks/asaas` (direct mode)
+- Stripe PIX: `/api/stripe/webhook` (`cart_voucher_pix` flow)
+
 ## Escalation
 
 - Stuck `PROCESSING` > `COMMISSION_PAYOUT_STUCK_HOURS` → alert email + manual Wise dashboard check.

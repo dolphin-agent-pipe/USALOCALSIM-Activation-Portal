@@ -6,6 +6,8 @@ import {
   getMercadoPagoAccessToken,
   processMercadoPagoPaymentApproved,
 } from "@/lib/mercadopago-cart";
+import { isPixCheckoutEnabled } from "@/lib/pix-provider";
+import { processPixPaymentApproved } from "@/lib/pix/pix-checkout-service";
 
 function extractPaymentId(req: Request, body: unknown): string | null {
   const url = new URL(req.url);
@@ -40,7 +42,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ received: true });
   }
 
-  const result = await processMercadoPagoPaymentApproved(paymentId);
+  const result = isPixCheckoutEnabled()
+    ? await processPixPaymentApproved(paymentId)
+    : await processMercadoPagoPaymentApproved(paymentId);
   const { ip, userAgent } = getRequestClientMeta(req);
   await prisma.auditLog.create({
     data: {

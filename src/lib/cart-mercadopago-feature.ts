@@ -1,15 +1,13 @@
-import {
-  getMercadoPagoAccessToken,
-  isCartMercadoPagoUiEnabled,
-} from "./mercadopago-config";
+import { isPixCheckoutEnabled, isPixCheckoutUiEnabled } from "./pix-provider";
 
 /**
- * Mercado Pago on prepaid cart when access token is set and flag is not explicitly false.
- * Server/API routes only — checks `MERCADOPAGO_ACCESS_TOKEN`.
+ * PIX checkout via configured provider (Asaas direct or Mercado Pago bridge).
+ * Kept as `isCartMercadoPago*` for backward-compatible imports.
  */
 export function isCartMercadoPagoEnabled(): boolean {
-  if (!getMercadoPagoAccessToken()) return false;
-  return isCartMercadoPagoUiEnabled();
+  return isPixCheckoutEnabled();
 }
 
-export { isCartMercadoPagoUiEnabled };
+export function isCartMercadoPagoUiEnabled(): boolean {
+  return isPixCheckoutUiEnabled();
+}

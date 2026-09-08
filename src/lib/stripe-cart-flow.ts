@@ -3,6 +3,9 @@ import type Stripe from "stripe";
 /** Current Stripe Checkout `metadata.flow` for physical-card cart purchases. */
 export const STRIPE_CART_CHECKOUT_FLOW = "cart_voucher";
 
+/** Stripe Checkout PIX (Brazil) cart flow. */
+export const STRIPE_PIX_CART_CHECKOUT_FLOW = "cart_voucher_pix";
+
 /** Current Stripe Checkout metadata key for the verified phone session id. */
 export const STRIPE_CART_SESSION_METADATA_KEY = "cartSessionId";
 
@@ -20,7 +23,7 @@ const LEGACY_SESSION_KEY = ["sh", "op", "Session", "Id"].join("");
 
 export function isStripeCartVoucherFlow(flow: string | undefined): boolean {
   if (!flow) return false;
-  if (flow === STRIPE_CART_CHECKOUT_FLOW) return true;
+  if (flow === STRIPE_CART_CHECKOUT_FLOW || flow === STRIPE_PIX_CART_CHECKOUT_FLOW) return true;
   return flow === LEGACY_FLOW;
 }
 

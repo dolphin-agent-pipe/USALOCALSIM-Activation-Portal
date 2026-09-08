@@ -9,6 +9,7 @@ import type { CartPlanRow } from "@/components/CartRegistrationAndPayment";
 import { creditCheckoutProfileById, type CreditCheckoutProfileId } from "@/lib/credit-checkout-profile";
 import { creditCheckoutDisplay } from "@/lib/credit-checkout-display";
 import type { CoverageTier } from "@/lib/coverage-tier";
+import { isPixCheckoutUiEnabled } from "@/lib/pix-provider";
 import {
   CART_FLOW_CLASS,
   CART_PANEL_CLASS,
@@ -37,17 +38,22 @@ export function CreditPaymentOptions({
   const profile = creditCheckoutProfileById(profileId);
   const t = useTranslations(profile.i18nNamespace);
   const tCart = useTranslations("cart");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState<"stripe" | "pix" | false>(false);
   const [error, setError] = useState<string | null>(null);
+  const pixEnabled = isPixCheckoutUiEnabled();
 
   const display = useMemo(
     () => creditCheckoutDisplay(profileId, faceValueCents),
     [profileId, faceValueCents],
   );
 
+  const brlPayCents = useMemo(() => {
+    return profile.brlReferenceCentsForFaceValue?.(faceValueCents) ?? profile.brlReferenceCents;
+  }, [profile, faceValueCents]);
+
   async function checkoutStripe() {
     setError(null);
-    setLoading(true);
+    setLoading("stripe");
     try {
       const res = await fetch("/api/cart/checkout", {
         method: "POST",
@@ -57,6 +63,35 @@ export function CreditPaymentOptions({
           payAmountCents: faceValueCents,
           customerName: checkoutCustomerName,
           ...(checkoutEmail ? { email: checkoutEmail } : {}),
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; url?: string };
+      if (!res.ok || !data.url) {
+        setError(typeof data.error === "string" ? data.error : tCart("errorGeneric"));
+        return;
+      }
+      window.location.href = data.url;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function checkoutPix() {
+    if (!checkoutEmail?.trim()) {
+      setError(tCart("errorGeneric"));
+      return;
+    }
+    setError(null);
+    setLoading("pix");
+    try {
+      const res = await fetch("/api/cart/checkout/pix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          planId: plan.id,
+          payAmountCents: brlPayCents,
+          customerName: checkoutCustomerName,
+          email: checkoutEmail,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string; url?: string };
@@ -86,16 +121,27 @@ export function CreditPaymentOptions({
             <button
               type="button"
               className={CART_PRIMARY_BUTTON_CLASS}
-              disabled={loading}
+              disabled={loading !== false}
               onClick={() => void checkoutStripe()}
             >
-              {loading ? tCart("paying") : t("payStripe", { amount: display.usdAmount })}
+              {loading === "stripe" ? tCart("paying") : t("payStripe", { amount: display.usdAmount })}
             </button>
 
-            <button type="button" className={CART_SECONDARY_BUTTON_CLASS} disabled>
-              {t("payPixAsaas", { amount: display.brlAmount })}
-              <span className="cart-linkup-payment-coming-soon">{t("comingSoon")}</span>
-            </button>
+            {pixEnabled ? (
+              <button
+                type="button"
+                className={CART_SECONDARY_BUTTON_CLASS}
+                disabled={loading !== false || !checkoutEmail}
+                onClick={() => void checkoutPix()}
+              >
+                {loading === "pix" ? tCart("paying") : t("payPixAsaas", { amount: display.brlAmount })}
+              </button>
+            ) : (
+              <button type="button" className={CART_SECONDARY_BUTTON_CLASS} disabled>
+                {t("payPixAsaas", { amount: display.brlAmount })}
+                <span className="cart-linkup-payment-coming-soon">{t("comingSoon")}</span>
+              </button>
+            )}
 
             <button type="button" className={CART_SECONDARY_BUTTON_CLASS} disabled>
               {t("payCrypto", { amount: display.usdAmount })}
