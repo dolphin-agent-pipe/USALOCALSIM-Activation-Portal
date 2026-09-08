@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth-server";
 import { getRequestClientMeta } from "@/lib/request-meta";
 import { normalizeTaxId } from "@/lib/partner-inventory";
+import { ensureWiseRecipientForPartner } from "@/lib/wise-recipient";
+import { isWiseConfigured } from "@/lib/wise-config";
 
 const profileSchema = z.object({
   legalType: z.enum(["PRIVATE", "BUSINESS"]),
@@ -77,7 +79,7 @@ export async function PUT(req: Request, ctx: Ctx) {
     verifiedAt: null as Date | null,
   };
 
-  const profile = await prisma.partnerPayoutProfile.upsert({
+  await prisma.partnerPayoutProfile.upsert({
     where: { partnerId },
     create: { partnerId, ...data },
     update: data,
@@ -98,5 +100,20 @@ export async function PUT(req: Request, ctx: Ctx) {
     },
   });
 
-  return NextResponse.json(profile);
+  let wiseRecipient: { ok: boolean; wiseRecipientId?: string; error?: string } | null = null;
+  if (isWiseConfigured() && data.bankCode && data.branchCode && data.accountNumber) {
+    const result = await ensureWiseRecipientForPartner(partnerId);
+    wiseRecipient = result.ok
+      ? { ok: true, wiseRecipientId: result.wiseRecipientId }
+      : { ok: false, error: result.error };
+  }
+
+  const refreshed = await prisma.partnerPayoutProfile.findUniqueOrThrow({
+    where: { partnerId },
+  });
+
+  return NextResponse.json({
+    ...refreshed,
+    wiseRecipient,
+  });
 }

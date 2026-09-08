@@ -376,6 +376,7 @@ model Partner {
   prepaidCards  PrepaidCard[] @relation("PrepaidCardAssignedPartner")
   commissions   Commission[]
   chargebackBalances PartnerChargebackBalance[]
+  payoutBatches PayoutBatch[]
 
   @@index([active])
 }
@@ -494,7 +495,9 @@ model Commission {
   offsetAppliedBrlCents Int      @default(0)
 
   payoutBatchId         String?
+  payoutBatch           PayoutBatch?  @relation(fields: [payoutBatchId], references: [id], onDelete: SetNull)
   payoutAttemptId       String?
+  payoutAttempt         PayoutAttempt? @relation(fields: [payoutAttemptId], references: [id], onDelete: SetNull)
 
   chargebackOfCommissionId String?
   refundExternalRef     String?
@@ -562,4 +565,55 @@ model CommissionOffsetAllocation {
   @@index([oldCommissionId])
   @@index([newCommissionId])
   @@index([chargebackBalanceId])
+}
+
+// ---------------------------------------------------------------------------
+// Partner commission Phase D — daily Wise consolidated payouts
+// ---------------------------------------------------------------------------
+
+model PayoutBatch {
+  id            String   @id @default(cuid())
+  partnerId     String
+  partner       Partner  @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  /// CREATED | SUBMITTED | PROCESSING | PAID | FAILED | REVIEW
+  status        String   @default("CREATED")
+  /// Sum of net BRL actually sent (after offsets applied to included commissions).
+  totalBrlCents Int      @default(0)
+  currency      String   @default("BRL") @db.VarChar(3)
+  /// Calendar date of daily run (UTC).
+  payoutDate    DateTime @db.Date
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  commissions   Commission[]
+  attempts      PayoutAttempt[]
+
+  @@unique([partnerId, payoutDate])
+  @@index([status, payoutDate])
+}
+
+model PayoutAttempt {
+  id                 String      @id @default(cuid())
+  batchId            String
+  batch              PayoutBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  partnerId          String
+  wiseRecipientId    String?
+  /// CREATED | QUOTED | SUBMITTED | PROCESSING | PAID | FAILED
+  status             String      @default("CREATED")
+  amountBrlCents     Int
+  currency           String      @default("BRL") @db.VarChar(3)
+  wiseQuoteId        String?
+  wiseTransferId     String?     @unique
+  wiseFeeSourceCents Int?
+  wiseRate           String?
+  wiseTransferNature String?
+  wiseRawQuote       String?     @db.Text
+  wiseRawTransfer    String?     @db.Text
+  wiseStatusMessage  String?     @db.Text
+  requestedAt        DateTime    @default(now())
+  completedAt        DateTime?
+  failedAt           DateTime?
+  commissions        Commission[]
+
+  @@index([partnerId, status])
+  @@index([batchId])
 }

@@ -159,6 +159,11 @@ const sections: NavSection[] = [
             label: "Commission ledger",
             active: (p) => p.startsWith("/admin/commissions"),
           },
+          {
+            href: "/admin/payouts",
+            label: "Payout batches",
+            active: (p) => p.startsWith("/admin/payouts"),
+          },
         ],
       },
       { href: "/admin/users", label: "Users", active: (p) => p.startsWith("/admin/users") },
