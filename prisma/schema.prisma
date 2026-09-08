@@ -375,6 +375,7 @@ model Partner {
   vouchers      Voucher[]     @relation("VoucherAssignedPartner")
   prepaidCards  PrepaidCard[] @relation("PrepaidCardAssignedPartner")
   commissions   Commission[]
+  chargebackBalances PartnerChargebackBalance[]
 
   @@index([active])
 }
@@ -465,7 +466,8 @@ model Commission {
   partnerId             String
   partner               Partner  @relation(fields: [partnerId], references: [id], onDelete: Restrict)
 
-  /// PENDING_FUNDS | ELIGIBLE | INCLUDED_IN_PAYOUT | PAID | CANCELLED | ADMIN_REVIEW
+  /// PENDING_FUNDS | ELIGIBLE | INCLUDED_IN_PAYOUT | PAID | CANCELLED |
+  /// CHARGEBACK_ADJUSTMENT | OFFSET_PARTIAL | OFFSET_SETTLED | ADMIN_REVIEW
   status                String   @default("PENDING_FUNDS")
 
   /// Snapshotted BRL centavos owed for this voucher sale.
@@ -488,6 +490,9 @@ model Commission {
   fundsAvailableAt      DateTime?
   eligibleAt            DateTime?
 
+  /// BRL centavos applied from this commission toward open chargeback balances.
+  offsetAppliedBrlCents Int      @default(0)
+
   payoutBatchId         String?
   payoutAttemptId       String?
 
@@ -498,6 +503,9 @@ model Commission {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   statusHistory         CommissionStatusEvent[]
+  sourceChargebackBalance PartnerChargebackBalance?
+  offsetAllocationsAsOld CommissionOffsetAllocation[] @relation("OffsetOld")
+  offsetAllocationsAsNew CommissionOffsetAllocation[] @relation("OffsetNew")
 
   @@index([partnerId, status])
   @@index([status, soldAt])
@@ -514,4 +522,44 @@ model CommissionStatusEvent {
   createdAt    DateTime   @default(now())
 
   @@index([commissionId, createdAt])
+}
+
+/// Outstanding negative balance after a paid commission was refunded/charged back.
+model PartnerChargebackBalance {
+  id                    String   @id @default(cuid())
+  partnerId             String
+  partner               Partner  @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  sourceCommissionId    String   @unique
+  sourceCommission      Commission @relation(fields: [sourceCommissionId], references: [id], onDelete: Restrict)
+  voucherSerialSnapshot String?
+  /// Remaining BRL centavos to recover (positive = debt).
+  remainingBrlCents     Int
+  originalBrlCents      Int
+  /// OPEN | SETTLED | ADMIN_REVIEW
+  status                String   @default("OPEN")
+  /// customer_refund | partner_irregularity
+  reason                String   @default("customer_refund")
+  refundExternalRef     String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  allocations           CommissionOffsetAllocation[]
+
+  @@index([partnerId, status])
+}
+
+/// Explicit old-voucher <-> new-voucher offset audit lines.
+model CommissionOffsetAllocation {
+  id                  String   @id @default(cuid())
+  chargebackBalanceId String
+  chargebackBalance   PartnerChargebackBalance @relation(fields: [chargebackBalanceId], references: [id], onDelete: Cascade)
+  oldCommissionId     String
+  oldCommission       Commission @relation("OffsetOld", fields: [oldCommissionId], references: [id])
+  newCommissionId     String
+  newCommission       Commission @relation("OffsetNew", fields: [newCommissionId], references: [id])
+  amountBrlCents      Int
+  createdAt           DateTime @default(now())
+
+  @@index([oldCommissionId])
+  @@index([newCommissionId])
+  @@index([chargebackBalanceId])
 }

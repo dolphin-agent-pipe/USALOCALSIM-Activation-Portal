@@ -14,41 +14,70 @@ type CommissionRow = {
   status: string;
   amountBrlCents: number;
   amountBrlFormatted: string;
+  offsetAppliedBrlFormatted?: string;
+  netPayableBrlFormatted?: string;
   paymentProvider: string;
   saleTransactionId: string;
   saleAmountCents: number | null;
   saleCurrency: string | null;
   soldAt: string;
-  fundsAvailableAt: string | null;
-  eligibleAt: string | null;
   serial: string | null;
   partner: { id: string; name: string };
   voucher: { code: string; inventoryStatus: string };
 };
 
-type SummaryRow = {
+type ChargebackRow = {
+  id: string;
   status: string;
-  count: number;
-  totalBrlFormatted: string;
+  reason: string;
+  originalBrlFormatted: string;
+  remainingBrlFormatted: string;
+  voucherSerialSnapshot: string | null;
+  partner: { id: string; name: string };
+  sourceCommission: {
+    id: string;
+    saleTransactionId: string;
+    status: string;
+  };
+  allocations: Array<{
+    amountBrlCents: number;
+    newCommission: { voucherSerialSnapshot: string | null };
+  }>;
 };
+
+type SummaryRow = { status: string; count: number; totalBrlFormatted: string };
 
 const STATUS_OPTIONS = [
   "",
   COMMISSION_STATUS.PENDING_FUNDS,
   COMMISSION_STATUS.ELIGIBLE,
+  COMMISSION_STATUS.OFFSET_PARTIAL,
+  COMMISSION_STATUS.OFFSET_SETTLED,
   COMMISSION_STATUS.INCLUDED_IN_PAYOUT,
   COMMISSION_STATUS.PAID,
   COMMISSION_STATUS.CANCELLED,
+  COMMISSION_STATUS.CHARGEBACK_ADJUSTMENT,
+  COMMISSION_STATUS.ADMIN_REVIEW,
 ];
+
+const REFUNDABLE = new Set([
+  COMMISSION_STATUS.PENDING_FUNDS,
+  COMMISSION_STATUS.ELIGIBLE,
+  COMMISSION_STATUS.OFFSET_PARTIAL,
+  COMMISSION_STATUS.INCLUDED_IN_PAYOUT,
+  COMMISSION_STATUS.PAID,
+]);
 
 export function AdminCommissionsClient() {
   const [partners, setPartners] = useState<PartnerOption[]>([]);
   const [rows, setRows] = useState<CommissionRow[]>([]);
+  const [chargebacks, setChargebacks] = useState<ChargebackRow[]>([]);
   const [summary, setSummary] = useState<SummaryRow[]>([]);
   const [partnerId, setPartnerId] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
   const [promoting, setPromoting] = useState(false);
+  const [refundingId, setRefundingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -57,17 +86,24 @@ export function AdminCommissionsClient() {
     const params = new URLSearchParams();
     if (partnerId) params.set("partnerId", partnerId);
     if (status) params.set("status", status);
-    return fetch(`/api/admin/commissions?${params.toString()}`)
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Failed to load commissions");
-        setRows(data.rows ?? []);
-        setSummary(data.summary ?? []);
+    const cbParams = new URLSearchParams();
+    if (partnerId) cbParams.set("partnerId", partnerId);
+
+    return Promise.all([
+      fetch(`/api/admin/commissions?${params.toString()}`).then((res) => res.json()),
+      fetch(`/api/admin/commissions/chargebacks?${cbParams.toString()}`).then((res) => res.json()),
+    ])
+      .then(([commData, cbData]) => {
+        if (commData.error) throw new Error(commData.error);
+        setRows(commData.rows ?? []);
+        setSummary(commData.summary ?? []);
+        setChargebacks(cbData.rows ?? []);
         setError(null);
       })
       .catch((e: Error) => {
         setRows([]);
         setSummary([]);
+        setChargebacks([]);
         setError(e.message);
       })
       .finally(() => setLoading(false));
@@ -111,12 +147,37 @@ export function AdminCommissionsClient() {
     }
   }
 
+  async function handleRefund(commissionId: string, adminReview = false) {
+    setRefundingId(commissionId);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/admin/commissions/refund-chargeback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commissionId, adminReview }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Refund/chargeback failed");
+      setMessage(
+        adminReview
+          ? "Commission flagged for admin review."
+          : `Processed: ${data.action}${data.notification ? ` — ${data.notification}` : ""}`,
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Refund/chargeback failed");
+    } finally {
+      setRefundingId(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <AdminPageHeader
         breadcrumbs={[{ label: "Partners", href: "/admin/partners" }, { label: "Commissions" }]}
         title="Commission ledger"
-        description="Original voucher sales only. PENDING_FUNDS until settlement hold elapses, then ELIGIBLE for daily Wise payout (Phase D)."
+        description="Refunds cancel unpaid commissions; paid commissions create chargeback balances offset against future sales."
         rightActions={
           <button
             type="button"
@@ -188,10 +249,10 @@ export function AdminCommissionsClient() {
                   <th className="px-4 py-3">Sold</th>
                   <th className="px-4 py-3">Partner</th>
                   <th className="px-4 py-3">Serial</th>
-                  <th className="px-4 py-3">Commission</th>
+                  <th className="px-4 py-3">Gross</th>
+                  <th className="px-4 py-3">Net payable</th>
                   <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Payment</th>
-                  <th className="px-4 py-3">Sale txn</th>
+                  <th className="px-4 py-3">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -209,13 +270,91 @@ export function AdminCommissionsClient() {
                       </Link>
                     </td>
                     <td className="px-4 py-2 font-mono text-xs">{r.serial ?? r.voucher.code}</td>
-                    <td className="px-4 py-2 tabular-nums font-medium">{r.amountBrlFormatted}</td>
+                    <td className="px-4 py-2 tabular-nums">{r.amountBrlFormatted}</td>
+                    <td className="px-4 py-2 tabular-nums font-medium">
+                      {r.netPayableBrlFormatted ?? r.amountBrlFormatted}
+                      {r.offsetAppliedBrlFormatted && r.offsetAppliedBrlFormatted !== "R$ 0,00" ? (
+                        <span className="block text-xs text-slate-500">
+                          offset {r.offsetAppliedBrlFormatted}
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-2">
                       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs">{r.status}</span>
                     </td>
-                    <td className="px-4 py-2 text-xs">{r.paymentProvider}</td>
-                    <td className="px-4 py-2 font-mono text-xs max-w-[10rem] truncate" title={r.saleTransactionId}>
-                      {r.saleTransactionId}
+                    <td className="px-4 py-2">
+                      {(REFUNDABLE as Set<string>).has(r.status) ? (
+                        <div className="flex flex-wrap gap-1">
+                          <button
+                            type="button"
+                            disabled={refundingId === r.id}
+                            className="text-xs text-red-700 hover:underline disabled:opacity-50"
+                            onClick={() => void handleRefund(r.id)}
+                          >
+                            Refund
+                          </button>
+                          <button
+                            type="button"
+                            disabled={refundingId === r.id}
+                            className="text-xs text-amber-700 hover:underline disabled:opacity-50"
+                            onClick={() => void handleRefund(r.id, true)}
+                          >
+                            Admin review
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-slate-400">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-5 py-3">
+          <h2 className="text-sm font-semibold text-slate-900">Chargeback balances</h2>
+          <p className="text-xs text-slate-500">
+            Open balances are offset automatically when new commissions become eligible.
+          </p>
+        </div>
+        {chargebacks.length === 0 ? (
+          <p className="p-5 text-sm text-slate-500">No chargeback balances.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Partner</th>
+                  <th className="px-4 py-3">Old voucher</th>
+                  <th className="px-4 py-3">Original</th>
+                  <th className="px-4 py-3">Remaining</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Offsets</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {chargebacks.map((cb) => (
+                  <tr key={cb.id}>
+                    <td className="px-4 py-2">{cb.partner.name}</td>
+                    <td className="px-4 py-2 font-mono text-xs">
+                      {cb.voucherSerialSnapshot ?? "—"}
+                    </td>
+                    <td className="px-4 py-2 tabular-nums">{cb.originalBrlFormatted}</td>
+                    <td className="px-4 py-2 tabular-nums font-medium">{cb.remainingBrlFormatted}</td>
+                    <td className="px-4 py-2 text-xs">{cb.status}</td>
+                    <td className="px-4 py-2 text-xs text-slate-600">
+                      {cb.allocations.length === 0
+                        ? "—"
+                        : cb.allocations
+                            .map(
+                              (a) =>
+                                `${a.newCommission.voucherSerialSnapshot ?? "?"} (${(a.amountBrlCents / 100).toFixed(2)})`,
+                            )
+                            .join(", ")}
                     </td>
                   </tr>
                 ))}

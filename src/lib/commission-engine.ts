@@ -10,6 +10,10 @@ import type {
   CustomerPaymentConfirmedEvent,
 } from "./customer-payment-events";
 import { VOUCHER_INVENTORY_STATUS } from "./partner-inventory";
+import {
+  applyChargebackOffsetsForCommission,
+  persistChargebackNotifications,
+} from "./commission-chargeback";
 
 type Db = Prisma.TransactionClient;
 
@@ -62,6 +66,10 @@ async function promoteToEligible(
     note,
   );
   return true;
+}
+
+async function finalizeEligibleCommission(tx: Db, commissionId: string) {
+  return applyChargebackOffsetsForCommission(tx, commissionId);
 }
 
 /**
@@ -161,6 +169,7 @@ export async function recordCommissionForVoucherSale(
         ? "Funds immediately available (POS / zero hold)"
         : "Funds immediately available (COMMISSION_IMMEDIATE_FUNDS_AVAILABLE)",
     );
+    await finalizeEligibleCommission(tx, commission.id);
     const refreshed = await tx.commission.findUniqueOrThrow({
       where: { id: commission.id },
       select: { status: true },
@@ -196,10 +205,12 @@ export async function markCommissionFundsAvailable(
 
   if ("$transaction" in db) {
     await db.$transaction(async (tx) => {
-      await promoteToEligible(tx, commission.id, settledAt, input.note);
+      const promoted = await promoteToEligible(tx, commission.id, settledAt, input.note);
+      if (promoted) await finalizeEligibleCommission(tx, commission.id);
     });
   } else {
-    await promoteToEligible(db, commission.id, settledAt, input.note);
+    const promoted = await promoteToEligible(db, commission.id, settledAt, input.note);
+    if (promoted) await finalizeEligibleCommission(db, commission.id);
   }
 
   return { updated: 1 };
@@ -210,7 +221,7 @@ export async function promotePendingCommissionsBySettlementHold(
 ): Promise<{ promoted: number }> {
   const pending = await db.commission.findMany({
     where: { status: COMMISSION_STATUS.PENDING_FUNDS },
-    select: { id: true, soldAt: true, paymentProvider: true },
+    select: { id: true, soldAt: true, paymentProvider: true, partnerId: true },
     orderBy: { soldAt: "asc" },
     take: 500,
   });
@@ -220,6 +231,7 @@ export async function promotePendingCommissionsBySettlementHold(
 
   for (const row of pending) {
     if (!isFundsAvailableByHold(row.soldAt, row.paymentProvider, now)) continue;
+    const notifications: string[] = [];
     const result = await db.$transaction(async (tx) => {
       const ok = await promoteToEligible(
         tx,
@@ -227,9 +239,15 @@ export async function promotePendingCommissionsBySettlementHold(
         now,
         `Settlement hold elapsed (${settlementHoldDaysForProvider(row.paymentProvider)}d)`,
       );
-      return ok ? 1 : 0;
+      if (!ok) return { ok: 0, notifications: [] as string[] };
+      const offset = await finalizeEligibleCommission(tx, row.id);
+      return { ok: 1, notifications: offset.notifications };
     });
-    promoted += result;
+    promoted += result.ok;
+    notifications.push(...result.notifications);
+    if (notifications.length) {
+      await persistChargebackNotifications(row.partnerId, row.id, notifications);
+    }
   }
 
   return { promoted };

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth-server";
 import { formatBrlFromCents } from "@/lib/partner-inventory";
+import { netPayableBrlCents } from "@/lib/commission-chargeback-status";
 
 export async function GET(req: Request) {
   const session = await requireAdmin();
@@ -57,6 +58,11 @@ export async function GET(req: Request) {
     rows: rows.map((r) => ({
       ...r,
       amountBrlFormatted: formatBrlFromCents(r.amountBrlCents),
+      offsetAppliedBrlFormatted: formatBrlFromCents(r.offsetAppliedBrlCents),
+      netPayableBrlCents: netPayableBrlCents(r.amountBrlCents, r.offsetAppliedBrlCents),
+      netPayableBrlFormatted: formatBrlFromCents(
+        netPayableBrlCents(r.amountBrlCents, r.offsetAppliedBrlCents),
+      ),
       serial: r.voucherSerialSnapshot ?? r.voucher.prepaidCard?.serial ?? null,
     })),
     summary: summary.map((s) => ({

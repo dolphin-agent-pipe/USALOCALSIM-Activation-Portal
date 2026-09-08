@@ -21,6 +21,7 @@ import {
 import { authorizePrepaidAfterPayment } from "@/lib/prepaid-authorize";
 import { PREPAID_PAYMENT_SOURCES } from "@/lib/prepaid-payment-source";
 import { normalizePhoneE164 } from "@/lib/phone-e164";
+import { handleStripeCommissionChargebackEvent } from "@/lib/stripe-commission-webhook";
 
 export async function POST(req: Request) {
   if (!stripe) {
@@ -40,6 +41,11 @@ export async function POST(req: Request) {
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: `Webhook signature verification failed: ${message}` }, { status: 400 });
+  }
+
+  if (event.type === "charge.refunded" || event.type === "charge.dispute.created") {
+    await handleStripeCommissionChargebackEvent(event);
+    return NextResponse.json({ received: true });
   }
 
   if (event.type !== "checkout.session.completed") {
