@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   commissionStatusBeforePayout,
   isCommissionPayable,
+  shouldSkipExistingBatch,
   utcPayoutDate,
 } from "./partner-daily-payout";
 import { COMMISSION_STATUS } from "./commission-status";
+import { PAYOUT_ATTEMPT_STATUS, PAYOUT_BATCH_STATUS } from "./payout-status";
 import { brlCentsToAmount } from "./wise-payout";
 
 describe("partner-daily-payout helpers", () => {
@@ -59,5 +61,22 @@ describe("partner-daily-payout helpers", () => {
   it("converts BRL centavos to decimal amount", () => {
     expect(brlCentsToAmount(6000)).toBe(60);
     expect(brlCentsToAmount(6050)).toBe(60.5);
+  });
+
+  it("skips batches that are paid or in progress", () => {
+    expect(shouldSkipExistingBatch(PAYOUT_BATCH_STATUS.PAID)).toEqual({
+      skip: true,
+      reason: "already_paid",
+    });
+    expect(shouldSkipExistingBatch(PAYOUT_BATCH_STATUS.PROCESSING)).toEqual({
+      skip: true,
+      reason: "in_progress",
+    });
+    expect(
+      shouldSkipExistingBatch(PAYOUT_BATCH_STATUS.CREATED, PAYOUT_ATTEMPT_STATUS.QUOTED),
+    ).toEqual({ skip: true, reason: "in_progress" });
+    expect(
+      shouldSkipExistingBatch(PAYOUT_BATCH_STATUS.FAILED, PAYOUT_ATTEMPT_STATUS.FAILED),
+    ).toEqual({ skip: false });
   });
 });

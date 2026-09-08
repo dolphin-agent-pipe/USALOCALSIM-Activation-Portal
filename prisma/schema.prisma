@@ -338,6 +338,16 @@ model RateLimitBlock {
   @@index([key, blockedUntil])
 }
 
+/// Short-lived DB lock to prevent overlapping commission cron jobs (Phase F).
+model CronJobLock {
+  lockKey    String   @id
+  ownerToken String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
 // Single-row config: strict ON = ICCID must exist in IccidWhitelist; OFF = Luhn pattern fallback only.
 model IccidValidationConfig {
   id                  String   @id // fixed "default"

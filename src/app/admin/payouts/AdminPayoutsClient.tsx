@@ -54,6 +54,23 @@ type BatchDetail = {
 
 type SummaryRow = { status: string; count: number; totalBrlFormatted: string };
 
+type HealthSnapshot = {
+  flags: {
+    payoutsEnabled: boolean;
+    payoutsSimulate: boolean;
+    wiseConfigured: boolean;
+    alertEmailsConfigured: boolean;
+  };
+  counts: {
+    eligible: number;
+    processingBatches: number;
+    failedBatchesLast7d: number;
+  };
+  locks: {
+    dailyPayoutToday: boolean;
+  };
+};
+
 const STATUS_OPTIONS = ["", ...Object.values(PAYOUT_BATCH_STATUS)];
 
 export function AdminPayoutsClient() {
@@ -69,6 +86,7 @@ export function AdminPayoutsClient() {
   const [detail, setDetail] = useState<BatchDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [health, setHealth] = useState<HealthSnapshot | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -92,6 +110,15 @@ export function AdminPayoutsClient() {
       .finally(() => setLoading(false));
   }, [partnerId, status]);
 
+  const loadHealth = useCallback(() => {
+    return fetch("/api/admin/payouts/health")
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.error) setHealth(data as HealthSnapshot);
+      })
+      .catch(() => setHealth(null));
+  }, []);
+
   useEffect(() => {
     void fetch("/api/admin/partners")
       .then((res) => res.json())
@@ -105,10 +132,14 @@ export function AdminPayoutsClient() {
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadHealth();
+  }, [load, loadHealth]);
 
   useEffect(() => {
-    const onRefresh = () => void load();
+    const onRefresh = () => {
+      void load();
+      void loadHealth();
+    };
     window.addEventListener(ADMIN_REFRESH_EVENT, onRefresh);
     return () => window.removeEventListener(ADMIN_REFRESH_EVENT, onRefresh);
   }, [load]);
@@ -143,6 +174,10 @@ export function AdminPayoutsClient() {
       if (partnerId) params.set("partnerId", partnerId);
       const res = await fetch(`/api/admin/payouts/run-daily?${params.toString()}`, { method: "POST" });
       const data = await res.json();
+      if (res.status === 409 && data.locked) {
+        setMessage("Daily payout already running (cron lock held). Try again later.");
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Daily payout failed");
       if (!data.enabled) {
         setMessage("Payouts are disabled (set COMMISSION_PAYOUTS_ENABLED=true).");
@@ -154,6 +189,7 @@ export function AdminPayoutsClient() {
         setMessage(`Daily run for ${data.payoutDate}: ${paid} sent/processing, ${failed} failed.`);
       }
       await load();
+      await loadHealth();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Daily payout failed");
     } finally {
@@ -171,6 +207,7 @@ export function AdminPayoutsClient() {
       setMessage(`Wise sync: ${data.status}`);
       if (expandedId === batchId) await loadDetail(batchId);
       await load();
+      await loadHealth();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Sync failed");
     } finally {
@@ -198,6 +235,18 @@ export function AdminPayoutsClient() {
 
       {error ? <AdminFeedbackBanner variant="error" message={error} /> : null}
       {message ? <AdminFeedbackBanner variant="success" message={message} /> : null}
+
+      {health ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <span className="font-medium">System health:</span> payouts{" "}
+          {health.flags.payoutsEnabled ? "enabled" : "disabled"}
+          {health.flags.payoutsSimulate ? " (simulate)" : ""} · Wise{" "}
+          {health.flags.wiseConfigured ? "configured" : "not configured"} ·{" "}
+          {health.counts.eligible} eligible · {health.counts.processingBatches} processing ·{" "}
+          {health.counts.failedBatchesLast7d} failed (7d)
+          {health.locks.dailyPayoutToday ? " · daily cron lock active" : ""}
+        </div>
+      ) : null}
 
       {summary.length > 0 ? (
         <div className="flex flex-wrap gap-2">

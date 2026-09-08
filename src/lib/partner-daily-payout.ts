@@ -21,8 +21,20 @@ import {
   WISE_TRANSFER_PAID_STATUSES,
   WISE_TRANSFER_PROCESSING_STATUSES,
 } from "./payout-status";
+import {
+  acquireCronLock,
+  partnerPayoutLockKey,
+  releaseCronLock,
+} from "./cron-lock";
 
 type Db = Prisma.TransactionClient;
+
+export class PayoutClaimError extends Error {
+  constructor(message = "commission_claim_conflict") {
+    super(message);
+    this.name = "PayoutClaimError";
+  }
+}
 
 export const PAYABLE_COMMISSION_STATUSES = [
   COMMISSION_STATUS.ELIGIBLE,
@@ -62,28 +74,64 @@ async function appendCommissionStatus(
   });
 }
 
-async function markCommissionsIncluded(
+export function shouldSkipExistingBatch(
+  batchStatus: string,
+  latestAttemptStatus?: string | null,
+): { skip: boolean; reason?: string } {
+  if (batchStatus === PAYOUT_BATCH_STATUS.PAID) {
+    return { skip: true, reason: "already_paid" };
+  }
+  if (
+    batchStatus === PAYOUT_BATCH_STATUS.PROCESSING ||
+    batchStatus === PAYOUT_BATCH_STATUS.SUBMITTED
+  ) {
+    return { skip: true, reason: "in_progress" };
+  }
+  if (batchStatus === PAYOUT_BATCH_STATUS.REVIEW) {
+    return { skip: true, reason: "admin_review" };
+  }
+  if (
+    batchStatus === PAYOUT_BATCH_STATUS.CREATED &&
+    latestAttemptStatus &&
+    latestAttemptStatus !== PAYOUT_ATTEMPT_STATUS.FAILED
+  ) {
+    return { skip: true, reason: "in_progress" };
+  }
+  return { skip: false };
+}
+
+async function claimCommissionsForPayout(
   tx: Db,
   commissionIds: string[],
   batchId: string,
   attemptId: string,
 ) {
-  for (const id of commissionIds) {
-    const row = await tx.commission.findUniqueOrThrow({
-      where: { id },
-      select: { status: true },
-    });
-    await tx.commission.update({
-      where: { id },
-      data: {
-        status: COMMISSION_STATUS.INCLUDED_IN_PAYOUT,
-        payoutBatchId: batchId,
-        payoutAttemptId: attemptId,
-      },
-    });
+  const before = await tx.commission.findMany({
+    where: { id: { in: commissionIds } },
+    select: { id: true, status: true },
+  });
+
+  const claimed = await tx.commission.updateMany({
+    where: {
+      id: { in: commissionIds },
+      payoutBatchId: null,
+      status: { in: [...PAYABLE_COMMISSION_STATUSES] },
+    },
+    data: {
+      status: COMMISSION_STATUS.INCLUDED_IN_PAYOUT,
+      payoutBatchId: batchId,
+      payoutAttemptId: attemptId,
+    },
+  });
+
+  if (claimed.count !== commissionIds.length) {
+    throw new PayoutClaimError();
+  }
+
+  for (const row of before) {
     await appendCommissionStatus(
       tx,
-      id,
+      row.id,
       row.status,
       COMMISSION_STATUS.INCLUDED_IN_PAYOUT,
       "Included in daily payout batch",
@@ -117,16 +165,63 @@ async function revertCommissionsFromFailedPayout(tx: Db, commissionIds: string[]
 }
 
 async function markCommissionsPaid(tx: Db, commissionIds: string[]) {
-  for (const id of commissionIds) {
-    const row = await tx.commission.findUniqueOrThrow({
-      where: { id },
-      select: { status: true },
+  const rows = await tx.commission.findMany({
+    where: { id: { in: commissionIds } },
+    select: { id: true, status: true },
+  });
+
+  await tx.commission.updateMany({
+    where: {
+      id: { in: commissionIds },
+      status: { not: COMMISSION_STATUS.PAID },
+    },
+    data: { status: COMMISSION_STATUS.PAID },
+  });
+
+  for (const row of rows) {
+    if (row.status === COMMISSION_STATUS.PAID) continue;
+    await appendCommissionStatus(tx, row.id, row.status, COMMISSION_STATUS.PAID, "Wise payout completed");
+  }
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: string }).code === "P2002"
+  );
+}
+
+async function getOrCreatePayoutBatch(input: {
+  partnerId: string;
+  payoutDate: Date;
+  totalBrlCents: number;
+  existingBatch: { id: string; status: string } | null;
+}) {
+  if (input.existingBatch) return input.existingBatch;
+
+  try {
+    return await prisma.payoutBatch.create({
+      data: {
+        partnerId: input.partnerId,
+        payoutDate: input.payoutDate,
+        status: PAYOUT_BATCH_STATUS.CREATED,
+        totalBrlCents: input.totalBrlCents,
+      },
     });
-    await tx.commission.update({
-      where: { id },
-      data: { status: COMMISSION_STATUS.PAID },
+  } catch (err) {
+    if (!isUniqueConstraintError(err)) throw err;
+    const found = await prisma.payoutBatch.findUnique({
+      where: {
+        partnerId_payoutDate: {
+          partnerId: input.partnerId,
+          payoutDate: input.payoutDate,
+        },
+      },
     });
-    await appendCommissionStatus(tx, id, row.status, COMMISSION_STATUS.PAID, "Wise payout completed");
+    if (!found) throw err;
+    return found;
   }
 }
 
@@ -145,6 +240,8 @@ export type DailyPayoutRunSummary = {
   enabled: boolean;
   payoutDate: string;
   partners: PartnerPayoutRunResult[];
+  locked?: boolean;
+  lockReason?: string;
 };
 
 async function loadPayableCommissions(partnerId: string) {
@@ -173,196 +270,119 @@ export async function runPartnerDailyPayout(input: {
 }): Promise<PartnerPayoutRunResult> {
   const { partnerId, partnerName, payoutDate } = input;
 
-  const existingBatch = await prisma.payoutBatch.findUnique({
-    where: { partnerId_payoutDate: { partnerId, payoutDate } },
-    include: {
-      attempts: { orderBy: { requestedAt: "desc" }, take: 1 },
-    },
-  });
-
-  if (existingBatch?.status === PAYOUT_BATCH_STATUS.PAID) {
-    return { partnerId, partnerName, status: "skipped", reason: "already_paid" };
+  const partnerLock = await acquireCronLock(partnerPayoutLockKey(partnerId, payoutDate));
+  if (!partnerLock.acquired) {
+    return { partnerId, partnerName, status: "skipped", reason: "partner_locked" };
   }
-  if (
-    existingBatch &&
-    (existingBatch.status === PAYOUT_BATCH_STATUS.PROCESSING ||
-      existingBatch.status === PAYOUT_BATCH_STATUS.SUBMITTED)
-  ) {
-    return { partnerId, partnerName, status: "skipped", reason: "in_progress" };
-  }
-
-  const payable = await loadPayableCommissions(partnerId);
-  if (!payable.length) {
-    return { partnerId, partnerName, status: "skipped", reason: "no_payable_commissions" };
-  }
-
-  const totalBrlCents = payable.reduce(
-    (sum, row) => sum + netPayableBrlCents(row.amountBrlCents, row.offsetAppliedBrlCents),
-    0,
-  );
-  if (totalBrlCents <= 0) {
-    return { partnerId, partnerName, status: "skipped", reason: "zero_net_payable" };
-  }
-
-  const profile = await prisma.partnerPayoutProfile.findUnique({ where: { partnerId } });
-  if (!profile) {
-    return { partnerId, partnerName, status: "skipped", reason: "payout_profile_missing" };
-  }
-
-  const wiseConfig = getWiseConfig();
-  const simulate = isWiseSimulateMode();
-
-  let wiseRecipientId = profile.wiseRecipientId;
-  if (!wiseRecipientId && wiseConfig) {
-    const recipient = await ensureWiseRecipientForPartner(partnerId);
-    if (!recipient.ok) {
-      return { partnerId, partnerName, status: "failed", reason: recipient.error };
-    }
-    wiseRecipientId = recipient.wiseRecipientId;
-  }
-  if (!wiseRecipientId && !simulate) {
-    return { partnerId, partnerName, status: "failed", reason: "wise_recipient_missing" };
-  }
-
-  const commissionIds = payable.map((r) => r.id);
-  const batch =
-    existingBatch ??
-    (await prisma.payoutBatch.create({
-      data: {
-        partnerId,
-        payoutDate,
-        status: PAYOUT_BATCH_STATUS.CREATED,
-        totalBrlCents,
-      },
-    }));
-
-  const attempt = await prisma.$transaction(async (tx) => {
-    if (existingBatch?.status === PAYOUT_BATCH_STATUS.FAILED) {
-      await tx.payoutBatch.update({
-        where: { id: batch.id },
-        data: { status: PAYOUT_BATCH_STATUS.CREATED, totalBrlCents },
-      });
-    } else if (existingBatch) {
-      await tx.payoutBatch.update({
-        where: { id: batch.id },
-        data: { totalBrlCents },
-      });
-    }
-
-    const createdAttempt = await tx.payoutAttempt.create({
-      data: {
-        batchId: batch.id,
-        partnerId,
-        wiseRecipientId,
-        status: PAYOUT_ATTEMPT_STATUS.CREATED,
-        amountBrlCents: totalBrlCents,
-      },
-    });
-
-    await markCommissionsIncluded(tx, commissionIds, batch.id, createdAttempt.id);
-    return createdAttempt;
-  });
-
-  if (simulate) {
-    await prisma.$transaction(async (tx) => {
-      await tx.payoutAttempt.update({
-        where: { id: attempt.id },
-        data: {
-          status: PAYOUT_ATTEMPT_STATUS.PAID,
-          wiseTransferId: `sim-${attempt.id}`,
-          wiseStatusMessage: "Simulated payout (COMMISSION_PAYOUTS_SIMULATE=true)",
-          completedAt: new Date(),
-        },
-      });
-      await tx.payoutBatch.update({
-        where: { id: batch.id },
-        data: { status: PAYOUT_BATCH_STATUS.PAID, totalBrlCents },
-      });
-      await markCommissionsPaid(tx, commissionIds);
-    });
-
-    return {
-      partnerId,
-      partnerName,
-      batchId: batch.id,
-      attemptId: attempt.id,
-      status: "simulated",
-      totalBrlCents,
-      wiseTransferId: `sim-${attempt.id}`,
-    };
-  }
-
-  if (!wiseConfig) {
-    await prisma.$transaction(async (tx) => {
-      await tx.payoutBatch.update({
-        where: { id: batch.id },
-        data: { status: PAYOUT_BATCH_STATUS.REVIEW },
-      });
-      await tx.payoutAttempt.update({
-        where: { id: attempt.id },
-        data: {
-          status: PAYOUT_ATTEMPT_STATUS.FAILED,
-          wiseStatusMessage: "Wise API not configured",
-          failedAt: new Date(),
-        },
-      });
-      await revertCommissionsFromFailedPayout(tx, commissionIds);
-    });
-    return {
-      partnerId,
-      partnerName,
-      batchId: batch.id,
-      attemptId: attempt.id,
-      status: "failed",
-      reason: "wise_not_configured",
-      totalBrlCents,
-    };
-  }
-
-  const correlationId = `payout-${batch.id}-${attempt.id}`;
-  const targetAmountBrl = brlCentsToAmount(totalBrlCents);
 
   try {
-    const quote = await createWisePayoutQuote(wiseConfig, {
-      targetAmountBrl,
-      recipientId: wiseRecipientId!,
-      correlationId,
-    });
-
-    await prisma.payoutAttempt.update({
-      where: { id: attempt.id },
-      data: {
-        status: PAYOUT_ATTEMPT_STATUS.QUOTED,
-        wiseQuoteId: quote.quoteId,
-        wiseRate: quote.rate,
-        wiseFeeSourceCents: quote.feeSourceCents,
-        wiseTransferNature: quote.transferNature,
-        wiseRawQuote: quote.rawQuote,
+    const existingBatch = await prisma.payoutBatch.findUnique({
+      where: { partnerId_payoutDate: { partnerId, payoutDate } },
+      include: {
+        attempts: { orderBy: { requestedAt: "desc" }, take: 1 },
       },
     });
 
-    const transfer = await createWisePayoutTransfer(wiseConfig, {
-      quoteId: quote.quoteId,
-      recipientId: wiseRecipientId!,
-      customerTransactionId: correlationId,
-      reference: `Commission ${payoutDate.toISOString().slice(0, 10)}`,
+    const skip = shouldSkipExistingBatch(
+      existingBatch?.status ?? "",
+      existingBatch?.attempts[0]?.status,
+    );
+    if (existingBatch && skip.skip) {
+      return { partnerId, partnerName, status: "skipped", reason: skip.reason };
+    }
+
+    const payable = await loadPayableCommissions(partnerId);
+    if (!payable.length) {
+      return { partnerId, partnerName, status: "skipped", reason: "no_payable_commissions" };
+    }
+
+    const totalBrlCents = payable.reduce(
+      (sum, row) => sum + netPayableBrlCents(row.amountBrlCents, row.offsetAppliedBrlCents),
+      0,
+    );
+    if (totalBrlCents <= 0) {
+      return { partnerId, partnerName, status: "skipped", reason: "zero_net_payable" };
+    }
+
+    const profile = await prisma.partnerPayoutProfile.findUnique({ where: { partnerId } });
+    if (!profile) {
+      return { partnerId, partnerName, status: "skipped", reason: "payout_profile_missing" };
+    }
+
+    const wiseConfig = getWiseConfig();
+    const simulate = isWiseSimulateMode();
+
+    let wiseRecipientId = profile.wiseRecipientId;
+    if (!wiseRecipientId && wiseConfig) {
+      const recipient = await ensureWiseRecipientForPartner(partnerId);
+      if (!recipient.ok) {
+        return { partnerId, partnerName, status: "failed", reason: recipient.error };
+      }
+      wiseRecipientId = recipient.wiseRecipientId;
+    }
+    if (!wiseRecipientId && !simulate) {
+      return { partnerId, partnerName, status: "failed", reason: "wise_recipient_missing" };
+    }
+
+    const commissionIds = payable.map((r) => r.id);
+    const batch = await getOrCreatePayoutBatch({
+      partnerId,
+      payoutDate,
+      totalBrlCents,
+      existingBatch,
     });
 
-    await fundWiseTransfer(wiseConfig, transfer.transferId, correlationId);
+    const refreshedSkip = shouldSkipExistingBatch(
+      batch.status,
+      existingBatch?.id === batch.id ? existingBatch.attempts[0]?.status : undefined,
+    );
+    if (batch.id !== existingBatch?.id && refreshedSkip.skip) {
+      return { partnerId, partnerName, status: "skipped", reason: refreshedSkip.reason };
+    }
 
-    const finalTransfer = await getWiseTransfer(wiseConfig, transfer.transferId);
-    const isPaid = WISE_TRANSFER_PAID_STATUSES.has(finalTransfer.status);
-    const isProcessing = WISE_TRANSFER_PROCESSING_STATUSES.has(finalTransfer.status);
+    let attempt;
+    try {
+      attempt = await prisma.$transaction(async (tx) => {
+        if (batch.status === PAYOUT_BATCH_STATUS.FAILED) {
+          await tx.payoutBatch.update({
+            where: { id: batch.id },
+            data: { status: PAYOUT_BATCH_STATUS.CREATED, totalBrlCents },
+          });
+        } else {
+          await tx.payoutBatch.update({
+            where: { id: batch.id },
+            data: { totalBrlCents },
+          });
+        }
 
-    if (isPaid) {
+        const createdAttempt = await tx.payoutAttempt.create({
+          data: {
+            batchId: batch.id,
+            partnerId,
+            wiseRecipientId,
+            status: PAYOUT_ATTEMPT_STATUS.CREATED,
+            amountBrlCents: totalBrlCents,
+          },
+        });
+
+        await claimCommissionsForPayout(tx, commissionIds, batch.id, createdAttempt.id);
+        return createdAttempt;
+      });
+    } catch (err) {
+      if (err instanceof PayoutClaimError) {
+        return { partnerId, partnerName, status: "skipped", reason: "commission_claim_conflict" };
+      }
+      throw err;
+    }
+
+    if (simulate) {
       await prisma.$transaction(async (tx) => {
         await tx.payoutAttempt.update({
           where: { id: attempt.id },
           data: {
             status: PAYOUT_ATTEMPT_STATUS.PAID,
-            wiseTransferId: transfer.transferId,
-            wiseRawTransfer: finalTransfer.raw,
-            wiseStatusMessage: finalTransfer.status,
+            wiseTransferId: `sim-${attempt.id}`,
+            wiseStatusMessage: "Simulated payout (COMMISSION_PAYOUTS_SIMULATE=true)",
             completedAt: new Date(),
           },
         });
@@ -378,27 +398,164 @@ export async function runPartnerDailyPayout(input: {
         partnerName,
         batchId: batch.id,
         attemptId: attempt.id,
-        status: "paid",
+        status: "simulated",
         totalBrlCents,
-        wiseTransferId: transfer.transferId,
+        wiseTransferId: `sim-${attempt.id}`,
       };
     }
 
-    if (isProcessing) {
+    if (!wiseConfig) {
+      await prisma.$transaction(async (tx) => {
+        await tx.payoutBatch.update({
+          where: { id: batch.id },
+          data: { status: PAYOUT_BATCH_STATUS.REVIEW },
+        });
+        await tx.payoutAttempt.update({
+          where: { id: attempt.id },
+          data: {
+            status: PAYOUT_ATTEMPT_STATUS.FAILED,
+            wiseStatusMessage: "Wise API not configured",
+            failedAt: new Date(),
+          },
+        });
+        await revertCommissionsFromFailedPayout(tx, commissionIds);
+      });
+      return {
+        partnerId,
+        partnerName,
+        batchId: batch.id,
+        attemptId: attempt.id,
+        status: "failed",
+        reason: "wise_not_configured",
+        totalBrlCents,
+      };
+    }
+
+    const correlationId = `payout-${batch.id}-${attempt.id}`;
+    const targetAmountBrl = brlCentsToAmount(totalBrlCents);
+
+    try {
+      const batchBeforeTransfer = await prisma.payoutBatch.findUnique({
+        where: { id: batch.id },
+        select: { status: true },
+      });
+      if (batchBeforeTransfer?.status === PAYOUT_BATCH_STATUS.PAID) {
+        return {
+          partnerId,
+          partnerName,
+          batchId: batch.id,
+          attemptId: attempt.id,
+          status: "skipped",
+          reason: "already_paid",
+        };
+      }
+
+      const quote = await createWisePayoutQuote(wiseConfig, {
+        targetAmountBrl,
+        recipientId: wiseRecipientId!,
+        correlationId,
+      });
+
+      await prisma.payoutAttempt.update({
+        where: { id: attempt.id },
+        data: {
+          status: PAYOUT_ATTEMPT_STATUS.QUOTED,
+          wiseQuoteId: quote.quoteId,
+          wiseRate: quote.rate,
+          wiseFeeSourceCents: quote.feeSourceCents,
+          wiseTransferNature: quote.transferNature,
+          wiseRawQuote: quote.rawQuote,
+        },
+      });
+
+      const transfer = await createWisePayoutTransfer(wiseConfig, {
+        quoteId: quote.quoteId,
+        recipientId: wiseRecipientId!,
+        customerTransactionId: correlationId,
+        reference: `Commission ${payoutDate.toISOString().slice(0, 10)}`,
+      });
+
+      await fundWiseTransfer(wiseConfig, transfer.transferId, correlationId);
+
+      const finalTransfer = await getWiseTransfer(wiseConfig, transfer.transferId);
+      const isPaid = WISE_TRANSFER_PAID_STATUSES.has(finalTransfer.status);
+      const isProcessing = WISE_TRANSFER_PROCESSING_STATUSES.has(finalTransfer.status);
+
+      if (isPaid) {
+        await prisma.$transaction(async (tx) => {
+          await tx.payoutAttempt.update({
+            where: { id: attempt.id },
+            data: {
+              status: PAYOUT_ATTEMPT_STATUS.PAID,
+              wiseTransferId: transfer.transferId,
+              wiseRawTransfer: finalTransfer.raw,
+              wiseStatusMessage: finalTransfer.status,
+              completedAt: new Date(),
+            },
+          });
+          await tx.payoutBatch.update({
+            where: { id: batch.id },
+            data: { status: PAYOUT_BATCH_STATUS.PAID, totalBrlCents },
+          });
+          await markCommissionsPaid(tx, commissionIds);
+        });
+
+        return {
+          partnerId,
+          partnerName,
+          batchId: batch.id,
+          attemptId: attempt.id,
+          status: "paid",
+          totalBrlCents,
+          wiseTransferId: transfer.transferId,
+        };
+      }
+
+      if (isProcessing) {
+        await prisma.$transaction(async (tx) => {
+          await tx.payoutAttempt.update({
+            where: { id: attempt.id },
+            data: {
+              status: PAYOUT_ATTEMPT_STATUS.PROCESSING,
+              wiseTransferId: transfer.transferId,
+              wiseRawTransfer: finalTransfer.raw,
+              wiseStatusMessage: finalTransfer.status,
+            },
+          });
+          await tx.payoutBatch.update({
+            where: { id: batch.id },
+            data: { status: PAYOUT_BATCH_STATUS.PROCESSING, totalBrlCents },
+          });
+        });
+
+        return {
+          partnerId,
+          partnerName,
+          batchId: batch.id,
+          attemptId: attempt.id,
+          status: "processing",
+          totalBrlCents,
+          wiseTransferId: transfer.transferId,
+        };
+      }
+
+      throw new Error(`Unexpected Wise transfer status: ${finalTransfer.status}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       await prisma.$transaction(async (tx) => {
         await tx.payoutAttempt.update({
           where: { id: attempt.id },
           data: {
-            status: PAYOUT_ATTEMPT_STATUS.PROCESSING,
-            wiseTransferId: transfer.transferId,
-            wiseRawTransfer: finalTransfer.raw,
-            wiseStatusMessage: finalTransfer.status,
+            status: PAYOUT_ATTEMPT_STATUS.FAILED,
+            wiseStatusMessage: message.slice(0, 4000),
+            failedAt: new Date(),
           },
         });
         await tx.payoutBatch.update({
           where: { id: batch.id },
-          data: { status: PAYOUT_BATCH_STATUS.PROCESSING, totalBrlCents },
+          data: { status: PAYOUT_BATCH_STATUS.FAILED },
         });
+        await revertCommissionsFromFailedPayout(tx, commissionIds);
       });
 
       return {
@@ -406,40 +563,13 @@ export async function runPartnerDailyPayout(input: {
         partnerName,
         batchId: batch.id,
         attemptId: attempt.id,
-        status: "processing",
+        status: "failed",
+        reason: message,
         totalBrlCents,
-        wiseTransferId: transfer.transferId,
       };
     }
-
-    throw new Error(`Unexpected Wise transfer status: ${finalTransfer.status}`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await prisma.$transaction(async (tx) => {
-      await tx.payoutAttempt.update({
-        where: { id: attempt.id },
-        data: {
-          status: PAYOUT_ATTEMPT_STATUS.FAILED,
-          wiseStatusMessage: message.slice(0, 4000),
-          failedAt: new Date(),
-        },
-      });
-      await tx.payoutBatch.update({
-        where: { id: batch.id },
-        data: { status: PAYOUT_BATCH_STATUS.FAILED },
-      });
-      await revertCommissionsFromFailedPayout(tx, commissionIds);
-    });
-
-    return {
-      partnerId,
-      partnerName,
-      batchId: batch.id,
-      attemptId: attempt.id,
-      status: "failed",
-      reason: message,
-      totalBrlCents,
-    };
+  } finally {
+    await releaseCronLock(partnerPayoutLockKey(partnerId, payoutDate), partnerLock.ownerToken);
   }
 }
 
@@ -499,6 +629,9 @@ export async function syncPayoutAttemptFromWise(attemptId: string): Promise<{
     },
   });
   if (!attempt) return { ok: false, error: "attempt_not_found" };
+  if (attempt.batch.status === PAYOUT_BATCH_STATUS.PAID) {
+    return { ok: true, status: PAYOUT_ATTEMPT_STATUS.PAID };
+  }
   if (!attempt.wiseTransferId || attempt.wiseTransferId.startsWith("sim-")) {
     return { ok: false, error: "no_wise_transfer" };
   }
