@@ -1,7 +1,7 @@
 import type { PartnerPayoutProfile } from "@prisma/client";
 import { prisma } from "./db";
 import { getWiseConfig } from "./wise-config";
-import { wiseRequest } from "./wise-client";
+import { WiseApiError, wiseRequest } from "./wise-client";
 
 type WiseRecipientResponse = {
   id: number;
@@ -28,7 +28,8 @@ function buildRecipientPayload(profile: PartnerPayoutProfile, profileId: number)
   details.accountType = mapAccountType(profile.accountType);
 
   const address: Record<string, string> = {};
-  if (profile.addressLine1) address.addressLine = profile.addressLine1;
+  // Wise Brazil recipient schema expects `firstLine` (not addressLine).
+  if (profile.addressLine1) address.firstLine = profile.addressLine1;
   if (profile.addressCity) address.city = profile.addressCity;
   if (profile.addressState) address.state = profile.addressState;
   if (profile.addressPostCode) address.postCode = profile.addressPostCode;
@@ -78,12 +79,23 @@ export async function ensureWiseRecipientForPartner(
   }
 
   const payload = buildRecipientPayload(profile, config.profileId);
-  const recipient = await wiseRequest<WiseRecipientResponse>(config, {
-    method: "POST",
-    path: "/v1/accounts",
-    body: payload,
-    correlationId: `partner-recipient-${partnerId}`,
-  });
+  let recipient: WiseRecipientResponse;
+  try {
+    recipient = await wiseRequest<WiseRecipientResponse>(config, {
+      method: "POST",
+      path: "/v1/accounts",
+      body: payload,
+      correlationId: `partner-recipient-${partnerId}`,
+    });
+  } catch (err) {
+    const message =
+      err instanceof WiseApiError
+        ? `Wise recipient create failed (${err.status}): ${err.body}`
+        : err instanceof Error
+          ? err.message
+          : "Wise recipient create failed";
+    return { ok: false, error: message };
+  }
 
   const wiseRecipientId = String(recipient.id);
   await prisma.partnerPayoutProfile.update({
