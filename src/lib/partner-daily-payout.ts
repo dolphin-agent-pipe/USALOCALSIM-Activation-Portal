@@ -15,6 +15,7 @@ import {
   fundWiseTransfer,
   getWiseTransfer,
 } from "./wise-payout";
+import { WiseApiError } from "./wise-client";
 import {
   PAYOUT_ATTEMPT_STATUS,
   PAYOUT_BATCH_STATUS,
@@ -431,6 +432,8 @@ export async function runPartnerDailyPayout(input: {
       };
     }
 
+    // Wise requires customerTransactionId to be a UUID (not payout-{cuid}-{cuid}).
+    const customerTransactionId = crypto.randomUUID();
     const correlationId = `payout-${batch.id}-${attempt.id}`;
     const targetAmountBrl = brlCentsToAmount(totalBrlCents);
 
@@ -471,7 +474,7 @@ export async function runPartnerDailyPayout(input: {
       const transfer = await createWisePayoutTransfer(wiseConfig, {
         quoteId: quote.quoteId,
         recipientId: wiseRecipientId!,
-        customerTransactionId: correlationId,
+        customerTransactionId,
         reference: `Commission ${payoutDate.toISOString().slice(0, 10)}`,
       });
 
@@ -541,7 +544,12 @@ export async function runPartnerDailyPayout(input: {
 
       throw new Error(`Unexpected Wise transfer status: ${finalTransfer.status}`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message =
+        err instanceof WiseApiError
+          ? `${err.message}: ${err.body}`.slice(0, 4000)
+          : err instanceof Error
+            ? err.message
+            : String(err);
       await prisma.$transaction(async (tx) => {
         await tx.payoutAttempt.update({
           where: { id: attempt.id },

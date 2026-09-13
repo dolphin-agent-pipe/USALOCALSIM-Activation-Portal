@@ -60,6 +60,8 @@ export async function createWisePayoutQuote(
       targetAmount: input.targetAmountBrl,
       targetAccount: Number(input.recipientId),
       payOut: "BANK_TRANSFER",
+      // Prefer balance funding for automated partner payouts.
+      payIn: "BALANCE",
       paymentMetadata: {
         transferNature: config.transferNature,
       },
