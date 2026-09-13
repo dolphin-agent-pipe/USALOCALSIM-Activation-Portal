@@ -478,11 +478,28 @@ export async function runPartnerDailyPayout(input: {
         reference: `Commission ${payoutDate.toISOString().slice(0, 10)}`,
       });
 
-      await fundWiseTransfer(wiseConfig, transfer.transferId, correlationId);
+      // Personal API tokens often cannot fund via API (403 forbidden / PSD2 SCA).
+      // Once the transfer exists, keep PROCESSING so Sync Wise / webhook can finish
+      // after manual funding — do not fail+revert (that would risk duplicate transfers).
+      let fundNote: string | null = null;
+      try {
+        await fundWiseTransfer(wiseConfig, transfer.transferId, correlationId);
+      } catch (fundErr) {
+        const detail =
+          fundErr instanceof WiseApiError
+            ? `${fundErr.status} ${fundErr.body}`
+            : fundErr instanceof Error
+              ? fundErr.message
+              : String(fundErr);
+        fundNote =
+          `Transfer created; API funding unavailable (${detail}). ` +
+          `Fund in Wise UI, then Sync Wise.`;
+      }
 
       const finalTransfer = await getWiseTransfer(wiseConfig, transfer.transferId);
       const isPaid = WISE_TRANSFER_PAID_STATUSES.has(finalTransfer.status);
       const isProcessing = WISE_TRANSFER_PROCESSING_STATUSES.has(finalTransfer.status);
+      const statusMessage = (fundNote ?? finalTransfer.status).slice(0, 4000);
 
       if (isPaid) {
         await prisma.$transaction(async (tx) => {
@@ -492,7 +509,7 @@ export async function runPartnerDailyPayout(input: {
               status: PAYOUT_ATTEMPT_STATUS.PAID,
               wiseTransferId: transfer.transferId,
               wiseRawTransfer: finalTransfer.raw,
-              wiseStatusMessage: finalTransfer.status,
+              wiseStatusMessage: statusMessage,
               completedAt: new Date(),
             },
           });
@@ -514,7 +531,7 @@ export async function runPartnerDailyPayout(input: {
         };
       }
 
-      if (isProcessing) {
+      if (isProcessing || fundNote) {
         await prisma.$transaction(async (tx) => {
           await tx.payoutAttempt.update({
             where: { id: attempt.id },
@@ -522,7 +539,7 @@ export async function runPartnerDailyPayout(input: {
               status: PAYOUT_ATTEMPT_STATUS.PROCESSING,
               wiseTransferId: transfer.transferId,
               wiseRawTransfer: finalTransfer.raw,
-              wiseStatusMessage: finalTransfer.status,
+              wiseStatusMessage: statusMessage,
             },
           });
           await tx.payoutBatch.update({
@@ -537,6 +554,7 @@ export async function runPartnerDailyPayout(input: {
           batchId: batch.id,
           attemptId: attempt.id,
           status: "processing",
+          reason: fundNote ?? undefined,
           totalBrlCents,
           wiseTransferId: transfer.transferId,
         };
