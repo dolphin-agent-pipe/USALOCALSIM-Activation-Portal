@@ -13,6 +13,7 @@ import {
 } from "@/lib/redeem-purchase-auth";
 import { ensureRedemptionAccessToken, redeemUrlWithAccess } from "@/lib/redemption-access";
 import { redeemPathForVoucher } from "@/lib/exclusive-voucher-redeem";
+import { maybeQueueCoreTopupAfterActivation } from "@/lib/core/fulfillment";
 
 const bodySchema = z.object({
   purchaseId: z.string().min(1),
@@ -115,8 +116,9 @@ export async function POST(req: Request) {
 
   const servicePhoneE164 = purchase.redemptionPhoneE164 ?? voucher.customerPhone ?? null;
 
+  let activationId: string;
   try {
-    await prisma.$transaction(async (tx) => {
+    const activation = await prisma.$transaction(async (tx) => {
       const claimed = await tx.voucher.updateMany({
         where: { id: voucher.id, status: { in: ["inactive", "eligible", "activated"] } },
         data: {
@@ -144,7 +146,7 @@ export async function POST(req: Request) {
         },
       });
 
-      await tx.activationRequest.create({
+      return tx.activationRequest.create({
         data: {
           email: purchase.customerEmail,
           scenario: ACTIVATION_SCENARIO_CART_VOUCHER,
@@ -159,8 +161,10 @@ export async function POST(req: Request) {
           shippingDeductionCents: 0,
           customerPhoneE164: servicePhoneE164,
         },
+        select: { id: true },
       });
     });
+    activationId = activation.id;
   } catch (e) {
     const name = e instanceof Error ? e.name : "";
     if (name === "VOUCHER_CLAIM_FAILED") {
@@ -182,6 +186,20 @@ export async function POST(req: Request) {
         userAgent,
       }),
     },
+  });
+
+  const paidPlan = await prisma.plan.findUnique({
+    where: { id: purchase.planId },
+    include: { network: { select: { slug: true } } },
+  });
+  await maybeQueueCoreTopupAfterActivation({
+    cartPurchaseId: purchase.id,
+    voucherId: voucher.id,
+    activationRequestId: activationId,
+    mobile: servicePhoneE164,
+    networkSlug: purchase.redemptionNetworkSlug ?? paidPlan?.network?.slug ?? null,
+    planSku: paidPlan?.sku ?? voucher.plan.sku,
+    priceCents: paidPlan?.priceCents ?? voucher.plan.priceCents,
   });
 
   return NextResponse.json({ ok: true });

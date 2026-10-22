@@ -15,6 +15,7 @@ import {
   parseRedeemEsimDeviceIds,
   redeemFlowRequiresEsimDeviceIds,
 } from "@/lib/redeem-esim-device";
+import { maybeQueueCoreTopupAfterActivation } from "@/lib/core/fulfillment";
 
 const bodySchema = z.object({
   purchaseId: z.string().min(1),
@@ -132,7 +133,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Remaining balance must be paid before activation." }, { status: 400 });
   }
 
-  await prisma.$transaction(async (tx) => {
+  const servicePhoneE164 = purchase.redemptionPhoneE164 ?? voucher.customerPhone ?? null;
+
+  const activation = await prisma.$transaction(async (tx) => {
     const claimed = await tx.voucher.updateMany({
       where: { id: voucher.id, status: { in: ["inactive", "eligible", "activated"] } },
       data: {
@@ -160,8 +163,7 @@ export async function POST(req: Request) {
       },
     });
 
-    const servicePhoneE164 = purchase.redemptionPhoneE164 ?? voucher.customerPhone ?? null;
-    await tx.activationRequest.create({
+    return tx.activationRequest.create({
       data: {
         email: purchase.customerEmail,
         scenario: ACTIVATION_SCENARIO_CART_VOUCHER,
@@ -179,7 +181,22 @@ export async function POST(req: Request) {
         deviceImei: parsedEsimDevice?.ok ? parsedEsimDevice.imei : null,
         deviceEid: parsedEsimDevice?.ok ? parsedEsimDevice.eid : null,
       },
+      select: { id: true },
     });
+  });
+
+  const networkSlug =
+    purchase.redemptionNetworkSlug?.trim() || plan.network?.slug || null;
+
+  // Core top-up after commit (simulate or live). Errors are swallowed inside helper.
+  await maybeQueueCoreTopupAfterActivation({
+    cartPurchaseId: purchase.id,
+    voucherId: voucher.id,
+    activationRequestId: activation.id,
+    mobile: servicePhoneE164,
+    networkSlug,
+    planSku: plan.sku,
+    priceCents: plan.priceCents,
   });
 
   return NextResponse.json({ ok: true });

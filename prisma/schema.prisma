@@ -627,3 +627,44 @@ model PayoutAttempt {
   @@index([partnerId, status])
   @@index([batchId])
 }
+
+// ---------------------------------------------------------------------------
+// Core C-TOP top-up jobs (Three UK / UK networks via Core retail API)
+// ---------------------------------------------------------------------------
+
+model CoreTopupJob {
+  id                   String    @id @default(cuid())
+  /// Optional links to portal entities (no FK — jobs can outlive soft deletes).
+  cartPurchaseId       String?
+  voucherId            String?
+  activationRequestId  String?
+  /// MSISDN digits only (Three: 12 with country code per Core PDF).
+  mobile               String    @db.VarChar(20)
+  opcode               String    @db.VarChar(16)
+  /// Voucher | Direct | Bundle
+  typeTxn              String    @db.VarChar(16)
+  /// Core `amount` major units (e.g. 10.00 GBP).
+  amountMajor          Float
+  /// Core ref_txn_id (>8 and <20 chars).
+  refTxnId             String    @unique @db.VarChar(20)
+  /// PENDING | SUBMITTED | PROCESSING | SUCCESS | FAILED | MANUAL
+  status               String    @default("PENDING") @db.VarChar(16)
+  coreTransactionId    String?   @db.VarChar(64)
+  /// Core status code: 0 Processing | 1 Success | 2 Failed
+  coreStatus           Int?
+  coreMessage          String?   @db.Text
+  requestPayload       String?   @db.Text
+  responsePayload      String?   @db.Text
+  callbackPayload      String?   @db.Text
+  attemptCount         Int       @default(0)
+  lastAttemptAt        DateTime?
+  completedAt          DateTime?
+  failedAt             DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([status, createdAt])
+  @@index([cartPurchaseId])
+  @@index([voucherId])
+  @@index([coreTransactionId])
+}
